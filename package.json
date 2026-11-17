@@ -4,7 +4,16 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "create:superadmin": "tsx src/scripts/create-super-admin.ts",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "tsx --test tests/*.unit.test.ts",
+    "test:integration": "tsx --test tests/*.integration.test.ts",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:generate": "prisma generate"
   },
   "keywords": [],
   "author": "",
@@ -12,7 +21,10 @@
   "type": "module",
   "dependencies": {
     "@prisma/client": "^6.19.3",
-    "express": "^5.3.0"
+    "dotenv": "^16.6.1",
+    "express": "^5.3.0",
+    "openai": "^7.57.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
