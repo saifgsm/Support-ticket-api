@@ -314,7 +314,7 @@ La désactivation révoque les refresh tokens, les jetons de récupération en a
 | GET | `/tickets/:id/comments` | Propriétaire `USER` uniquement; historique chronologique de la conversation |
 | POST | `/tickets/:id/comments` | Propriétaire `USER` uniquement; ajoute un commentaire et crée une réponse IA |
 | PATCH | `/tickets/:id/status` | `SUPER_ADMIN`, `ADMIN` ou `AGENT` |
-| POST | `/tickets/:id/ai-response` | `SUPER_ADMIN`, `ADMIN` ou `AGENT`; enregistre un brouillon IA sans l'envoyer |
+| POST | `/tickets/:id/ai-response` | `SUPER_ADMIN`, `ADMIN` ou `AGENT`; `USER` uniquement pour son propre ticket |
 
 Statuts autorisés : `open`, `in_progress`, `closed`.
 
@@ -335,9 +335,9 @@ La réponse est enveloppée de façon commune : les données sont dans `data`, e
 
 ### Brouillon de réponse assisté par IA
 
-Le technicien appelle `POST /tickets/:id/ai-response` avec son access token. L'API envoie au modèle uniquement le titre, la description, la catégorie et le statut du ticket; elle n'envoie pas l'identité ou l'e-mail du créateur. La réponse structurée est validée par Zod puis enregistrée dans `TicketAiDraft`. Le résultat reste un brouillon : aucun e-mail n'est envoyé et le statut du ticket n'est pas modifié. Les requêtes sont limitées à 10 par IP sur 15 minutes. La requête utilise `store: false` pour ne pas conserver l'état de la réponse OpenAI ; les règles de journalisation anti-abus du fournisseur restent distinctes.
+Un rôle support appelle `POST /tickets/:id/ai-response` pour n'importe quel ticket. Un `USER` peut appeler cette route uniquement pour son propre ticket. L'API envoie au modèle uniquement le titre, la description, la catégorie et le statut du ticket; elle n'envoie pas l'identité ou l'e-mail de la personne qui l'a créé. La réponse structurée est validée par Zod, enregistrée dans `TicketAiDraft` et renvoyée dans la réponse HTTP. Aucun e-mail n'est envoyé et le statut du ticket n'est pas modifié. Les requêtes sont limitées à 10 par IP sur 15 minutes. La requête utilise `store: false` pour ne pas conserver l'état de la réponse OpenAI ; les règles de journalisation anti-abus du fournisseur restent distinctes.
 
-`GET /tickets/:id` inclut uniquement le texte proposé au client dans `data.customer_response` pour les rôles `SUPER_ADMIN`, `ADMIN` et `AGENT`. Les autres informations internes du brouillon IA ne sont pas renvoyées. Le compte `USER` ne reçoit pas ce texte tant qu'un technicien ne l'a pas validé.
+`GET /tickets/:id` inclut le champ `customer_response` uniquement pour les rôles `SUPER_ADMIN`, `ADMIN` et `AGENT`. Un `USER` reçoit sa réponse directement dans le résultat de `POST /tickets/:id/ai-response`; la lecture standard du ticket ne renvoie pas le brouillon.
 
 ### Conversation utilisateur avec l'IA
 

@@ -160,8 +160,8 @@ export const openApiDocument = {
     "/tickets/{id}/ai-response": {
       post: {
         tags: ["Tickets"],
-        summary: "Générer et enregistrer un brouillon de réponse IA (support uniquement)",
-        description: "Réservé à SUPER_ADMIN, ADMIN et AGENT. Le brouillon est enregistré mais jamais envoyé automatiquement et ne modifie pas le statut du ticket.",
+        summary: "Générer et enregistrer une réponse IA",
+        description: "Accessible à SUPER_ADMIN, ADMIN et AGENT; un USER peut l'utiliser uniquement pour son propre ticket. Le résultat est enregistré et renvoyé dans la réponse HTTP; aucun e-mail n'est envoyé et le statut du ticket n'est pas modifié.",
         security: [{ bearerAuth: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
         responses: {

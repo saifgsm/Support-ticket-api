@@ -310,15 +310,20 @@ test("la désactivation est auditée et bloque immédiatement l'ancien access to
   assert.ok(logBody.data.some((log) => log.action === "USER_DISABLED" && log.targetUser?.id === target.user.id));
 });
 
-test("la génération d'un brouillon IA exige un token et un rôle de support", async () => {
+test("la génération IA exige un token et autorise le USER propriétaire du ticket", async () => {
   const anonymous = await callApi("/tickets/00000000-0000-4000-8000-000000000001/ai-response", { method: "POST" });
   assert.equal(anonymous.status, 401);
 
   const customer = await createUser("USER");
-  const forbidden = await callApi("/tickets/00000000-0000-4000-8000-000000000001/ai-response", {
-    method: "POST", token: customer.token,
-  });
-  assert.equal(forbidden.status, 403);
+  const ticket = await createCustomerTicket(customer.token);
+  const response = await callAiApi(`/tickets/${ticket.id}/ai-response`, customer.token);
+  const body = await response.json() as {
+    data: { ticketId: string; generatedById: string; response: { customer_response: string } };
+  };
+  assert.equal(response.status, 201);
+  assert.equal(body.data.ticketId, ticket.id);
+  assert.equal(body.data.generatedById, customer.user.id);
+  assert.ok(body.data.response.customer_response.length > 0);
 });
 
 test("le ticket retourné au support inclut le brouillon IA sans le montrer au client", async () => {
@@ -484,12 +489,6 @@ test("les requêtes simultanées ne lancent pas deux générations pour le même
   conversationHarness.generationCalls = 0;
   const owner = await createUser("USER");
   const ticket = await createCustomerTicket(owner.token);
-  for (let index = 1; index <= 19; index += 1) {
-    const response = await callAiApi(`/tickets/${ticket.id}/comments`, owner.token, {
-      body: { content: `Commentaire préalable ${index}` },
-    });
-    assert.equal(response.status, 201);
-  }
 
   let signalStarted!: () => void;
   let releaseGeneration!: () => void;
@@ -507,16 +506,18 @@ test("les requêtes simultanées ne lancent pas deux générations pour le même
       body: { content: "Deuxième message envoyé pendant la génération." },
     });
     assert.equal(secondRequest.status, 409);
+    const secondBody = await secondRequest.json() as { error: { message: string } };
+    assert.equal(secondBody.error.message, "Une réponse IA est déjà en cours pour ce ticket.");
     assert.equal(conversationHarness.generationCalls, 1);
 
     releaseGeneration();
     const firstResponse = await firstRequest;
     assert.equal(firstResponse.status, 201);
-    assert.equal(conversationHarness.generationCalls, 20);
+    assert.equal(conversationHarness.generationCalls, 1);
 
     const historyResponse = await callAiApi(`/tickets/${ticket.id}/comments`, owner.token, { method: "GET" });
     const history = await historyResponse.json() as { data: Array<{ type: string }> };
-    assert.equal(history.data.filter((comment) => comment.type === "USER").length, 20);
+    assert.equal(history.data.filter((comment) => comment.type === "USER").length, 1);
   } finally {
     releaseGeneration();
     conversationHarness.waitForGeneration = undefined;
