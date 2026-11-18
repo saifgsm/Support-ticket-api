@@ -29,6 +29,10 @@ test("un JWT est accepté seulement si sa signature et son expiration sont valid
 
 test("les schémas Zod valident les corps et les filtres avant le service", () => {
   assert.equal(loginSchema.safeParse({ email: "pas-un-email", password: "x" }).success, false);
+  assert.deepEqual(
+    loginSchema.parse({ email: "  Sifouffc@gmail.com  ", password: "correct-password-123" }),
+    { email: "Sifouffc@gmail.com", password: "correct-password-123" },
+  );
   assert.equal(createTicketSchema.safeParse({ title: "Titre", description: "texte", category: "BUG" }).success, true);
   assert.equal(createTicketSchema.safeParse({ title: "Titre", description: "texte", category: "UNKNOWN" }).success, false);
   assert.equal(createTicketSchema.safeParse({ title: "Titre", description: "texte" }).success, false);

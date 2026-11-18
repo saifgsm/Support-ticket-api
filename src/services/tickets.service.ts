@@ -1,4 +1,4 @@
-import type { Role } from "@prisma/client";
+import type { Role, TicketCategory } from "@prisma/client";
 
 import { ApiError } from "../errors.js";
 import { prisma } from "../db.js";
@@ -9,6 +9,26 @@ import type {
   ListTicketsQuery,
   UpdateTicketStatusInput,
 } from "../modules/tickets/tickets.schemas.js";
+
+type UserTicketSummaryInput = {
+  id: string;
+  title: string;
+  description: string;
+  category: TicketCategory;
+  status: string;
+  createdAt: Date;
+};
+
+function toUserTicketSummary(ticket: UserTicketSummaryInput) {
+  return {
+    id: ticket.id,
+    title: ticket.title,
+    description: ticket.description,
+    category: ticket.category,
+    status: ticket.status,
+    createdAt: ticket.createdAt,
+  };
+}
 
 // Les services portent les règles métier et parlent à Prisma; ils ne connaissent
 // pas Express, les URL ou le format des réponses HTTP.
@@ -38,7 +58,7 @@ export async function listTickets(userId: string, role: Role, query: ListTickets
   ]);
 
   return {
-    items,
+    items: role === "USER" ? items.map(toUserTicketSummary) : items,
     pagination: {
       page: query.page,
       limit: query.limit,
@@ -48,9 +68,9 @@ export async function listTickets(userId: string, role: Role, query: ListTickets
   };
 }
 
-export async function createTicket(userId: string, input: CreateTicketInput) {
+export async function createTicket(userId: string, input: CreateTicketInput, role: Role) {
   const { title, description, category } = input;
-  return prisma.ticket.create({
+  const ticket = await prisma.ticket.create({
     data: {
       title: title.trim(),
       description: description.trim(),
@@ -60,6 +80,7 @@ export async function createTicket(userId: string, input: CreateTicketInput) {
       createdById: userId,
     },
   });
+  return role === "USER" ? toUserTicketSummary(ticket) : ticket;
 }
 
 export async function getTicket(idInput: string, userId: string, role: Role) {
@@ -74,10 +95,6 @@ export async function getTicket(idInput: string, userId: string, role: Role) {
     throw new ApiError(404, "Ticket introuvable.");
   }
 
-  // Le brouillon reste réservé aux rôles support : l'inclure dans la réponse du
-  // client reviendrait à lui montrer une réponse qui n'a pas encore été validée.
-  if (role === "USER") return ticket;
-
   const latestDraft = await prisma.ticketAiDraft.findFirst({
     where: { ticketId: id },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -86,10 +103,20 @@ export async function getTicket(idInput: string, userId: string, role: Role) {
   const parsedResponse = latestDraft
     ? ticketAiResponseSchema.safeParse(latestDraft.response)
     : null;
+  const customerResponse = parsedResponse?.success
+    ? parsedResponse.data.customer_response
+    : null;
+
+  if (role === "USER") {
+    return {
+      ...toUserTicketSummary(ticket),
+      customer_response: customerResponse,
+    };
+  }
 
   return {
     ...ticket,
-    customer_response: parsedResponse?.success ? parsedResponse.data.customer_response : null,
+    customer_response: customerResponse,
   };
 }
 

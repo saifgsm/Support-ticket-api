@@ -2,7 +2,7 @@ import { z } from "zod";
 
 // Règles réutilisées par plusieurs opérations d'authentification : une adresse
 // doit ressembler à un e-mail, et un nouveau mot de passe doit être assez long.
-const email = z.email().max(254);
+const email = z.string().trim().pipe(z.email().max(254));
 const password = z.string().min(12, "Le mot de passe doit contenir au moins 12 caractères.").max(128);
 
 // Chaque schéma décrit la forme attendue du JSON pour une route précise.

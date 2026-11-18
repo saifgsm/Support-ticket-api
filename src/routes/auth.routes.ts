@@ -24,7 +24,12 @@ authRouter.post(
 );
 authRouter.post("/login", validateBody(loginSchema), authController.login);
 authRouter.post("/refresh", validateBody(refreshSchema), authController.refresh);
-authRouter.post("/logout", validateBody(logoutSchema), authController.logout);
+authRouter.post(
+  "/logout",
+  requireAuthentication,
+  validateBody(logoutSchema),
+  authController.logout,
+);
 authRouter.post(
   "/forgot-password",
   validateBody(forgotPasswordSchema),

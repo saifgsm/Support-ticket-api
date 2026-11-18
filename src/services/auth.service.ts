@@ -28,6 +28,22 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+async function findLoginUserByEmail(email: string) {
+  const normalizedEmail = normalizeEmail(email);
+  const exactMatch = await prisma.user.findUnique({
+    where: { email: normalizedEmail },
+  });
+  if (exactMatch) return exactMatch;
+
+  // Les anciens comptes peuvent avoir été créés avant la normalisation en minuscules.
+  // Ne choisit pas arbitrairement si plusieurs lignes ne diffèrent que par la casse.
+  const legacyMatches = await prisma.user.findMany({
+    where: { email: { equals: normalizedEmail, mode: "insensitive" } },
+    take: 2,
+  });
+  return legacyMatches.length === 1 ? legacyMatches[0] : null;
+}
+
 function publicUser(user: { id: string; email: string; name: string; role: Role }) {
   // Ne jamais retourner passwordHash ou d'autres champs internes au client.
   return { id: user.id, email: user.email, name: user.name, role: user.role };
@@ -43,16 +59,30 @@ async function issueSession(user: {
   // peut être révoqué car sa version hachée est enregistrée dans la base.
   const refreshToken = createOpaqueToken();
   const expiresAt = expiresInDays(REFRESH_TOKEN_TTL_DAYS);
-  await prisma.refreshToken.create({
-    data: {
-      userId: user.id,
-      tokenHash: hashToken(refreshToken),
-      expiresAt,
-    },
+  const sessionUser = await prisma.$transaction(async (tx) => {
+    // Sérialise l'émission de session avec logout/refresh pour qu'une connexion
+    // concurrente ne réintroduise pas un refresh token après sa révocation.
+    const lockedUsers = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "User" WHERE "id" = ${user.id} FOR UPDATE
+    `;
+    if (lockedUsers.length === 0) throw new ApiError(401, "Compte introuvable.");
+
+    const currentUser = await tx.user.findUnique({
+      where: { id: user.id },
+      select: { id: true, email: true, role: true, status: true, tokenVersion: true },
+    });
+    if (!currentUser || currentUser.status !== "ACTIVE") {
+      throw new ApiError(403, "Ce compte n'est pas actif.");
+    }
+
+    await tx.refreshToken.create({
+      data: { userId: currentUser.id, tokenHash: hashToken(refreshToken), expiresAt },
+    });
+    return currentUser;
   });
 
   return {
-    accessToken: createAccessToken(user),
+    accessToken: createAccessToken(sessionUser),
     refreshToken,
     tokenType: "Bearer",
     accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
@@ -101,9 +131,7 @@ export async function acceptInvitation(input: AcceptInvitationInput) {
 
 export async function login(input: LoginInput) {
   const { email, password } = input;
-  const user = await prisma.user.findUnique({
-    where: { email: normalizeEmail(email) },
-  });
+  const user = await findLoginUserByEmail(email);
   // Même message pour e-mail inconnu et mot de passe faux afin de ne pas aider à
   // deviner quelles adresses possèdent un compte.
   if (!user || !(await verifyPassword(password, user.passwordHash))) {
@@ -145,8 +173,14 @@ export async function refreshSession(input: RefreshInput) {
   const nextRefreshToken = createOpaqueToken();
   const nextExpiresAt = expiresInDays(REFRESH_TOKEN_TTL_DAYS);
   // Rotation atomique : l'ancien refresh token est marqué révoqué et le nouveau
-  // est créé dans la même transaction. Une seule requête concurrente peut gagner.
-  const rotated = await prisma.$transaction(async (tx) => {
+  // est créé dans la même transaction. Le verrou utilisateur sérialise aussi
+  // cette opération avec logout, qui révoque toutes les sessions du compte.
+  const rotatedUser = await prisma.$transaction(async (tx) => {
+    const lockedUsers = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "User" WHERE "id" = ${stored.userId} FOR UPDATE
+    `;
+    if (lockedUsers.length === 0) return null;
+
     const claimed = await tx.refreshToken.updateMany({
       where: {
         id: stored.id,
@@ -156,13 +190,13 @@ export async function refreshSession(input: RefreshInput) {
       },
       data: { revokedAt: new Date() },
     });
-    if (claimed.count !== 1) return false;
+    if (claimed.count !== 1) return null;
 
     const activeUser = await tx.user.findUnique({
       where: { id: stored.userId },
-      select: { status: true },
+      select: { id: true, email: true, role: true, status: true, tokenVersion: true },
     });
-    if (!activeUser || activeUser.status !== "ACTIVE") return false;
+    if (!activeUser || activeUser.status !== "ACTIVE") return null;
 
     await tx.refreshToken.create({
       data: {
@@ -171,10 +205,10 @@ export async function refreshSession(input: RefreshInput) {
         expiresAt: nextExpiresAt,
       },
     });
-    return true;
+    return activeUser;
   });
 
-  if (!rotated) {
+  if (!rotatedUser) {
     await prisma.refreshToken.updateMany({
       where: { userId: stored.userId, revokedAt: null },
       data: { revokedAt: new Date() },
@@ -183,7 +217,7 @@ export async function refreshSession(input: RefreshInput) {
   }
 
   return {
-    accessToken: createAccessToken(stored.user),
+    accessToken: createAccessToken(rotatedUser),
     refreshToken: nextRefreshToken,
     tokenType: "Bearer",
     accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
@@ -191,13 +225,37 @@ export async function refreshSession(input: RefreshInput) {
   };
 }
 
-export async function logout(input: RefreshInput): Promise<void> {
+export async function logout(userId: string, input: RefreshInput): Promise<void> {
   const { refreshToken } = input;
-  // On ne stocke pas le refresh token en clair; on hache celui reçu pour trouver
-  // puis révoquer sa ligne en base.
-  await prisma.refreshToken.updateMany({
-    where: { tokenHash: hashToken(refreshToken), revokedAt: null },
-    data: { revokedAt: new Date() },
+  const tokenHash = hashToken(refreshToken);
+  const now = new Date();
+
+  await prisma.$transaction(async (tx) => {
+    // Le verrou empêche un refresh simultané de créer une nouvelle session après
+    // que la déconnexion a invalidé le tokenVersion du compte.
+    const lockedUsers = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE
+    `;
+    if (lockedUsers.length !== 1) throw new ApiError(401, "Compte introuvable.");
+
+    const suppliedToken = await tx.refreshToken.findUnique({
+      where: { tokenHash },
+      select: { userId: true },
+    });
+    if (!suppliedToken || suppliedToken.userId !== userId) {
+      throw new ApiError(401, "Refresh token invalide.");
+    }
+
+    // tokenVersion est vérifié par requireAuthentication à chaque requête. Comme
+    // cette version est propre au compte, logout ferme toutes ses sessions.
+    await tx.user.update({
+      where: { id: userId },
+      data: { tokenVersion: { increment: 1 } },
+    });
+    await tx.refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: now },
+    });
   });
 }
 

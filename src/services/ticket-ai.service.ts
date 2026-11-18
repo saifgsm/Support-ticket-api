@@ -24,11 +24,26 @@ export type SaveDraftInput = {
   response: TicketAiResponse;
 };
 
+export type SavedTicketAiDraft = {
+  id: string;
+  ticketId: string;
+  generatedById: string | null;
+  model: string;
+  response: unknown;
+  createdAt: Date;
+};
+
+export type UserTicketAiDraftResponse = {
+  id: string;
+  ticketId: string;
+  response: Pick<TicketAiResponse, "customer_response">;
+};
+
 export type TicketAiServiceDependencies = {
   model: string;
   getTicket: (id: string, userId: string, role: Role) => Promise<TicketAiInput>;
   generateResponse: (ticket: TicketAiInput, model: string) => Promise<unknown>;
-  saveDraft: (input: SaveDraftInput) => Promise<unknown>;
+  saveDraft: (input: SaveDraftInput) => Promise<SavedTicketAiDraft>;
 };
 
 async function generateStructuredResponse(ticket: TicketAiInput, model: string): Promise<unknown> {
@@ -89,12 +104,22 @@ export function createTicketAiService(dependencies: TicketAiServiceDependencies)
       // La catégorie de la base est la référence : une sortie du modèle ne peut pas
       // modifier ni réattribuer la catégorie réelle du ticket.
       const response = { ...parsed.data, category: ticket.category };
-      return dependencies.saveDraft({
+      const savedDraft = await dependencies.saveDraft({
         ticketId: ticket.id,
         generatedById,
         model: dependencies.model,
         response,
       });
+
+      if (role === "USER") {
+        return {
+          id: savedDraft.id,
+          ticketId: savedDraft.ticketId,
+          response: { customer_response: response.customer_response },
+        } satisfies UserTicketAiDraftResponse;
+      }
+
+      return savedDraft;
     },
   };
 }

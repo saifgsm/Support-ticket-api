@@ -43,6 +43,7 @@ export const createTicket: RequestHandler = async (req, res) => {
   const ticket = await ticketService.createTicket(
     user.id,
     getValidatedBody<CreateTicketInput>(res),
+    user.role,
   );
   sendSuccess(res, ticket, 201);
 };

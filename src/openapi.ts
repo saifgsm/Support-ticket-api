@@ -1,9 +1,18 @@
 /** Spécification OpenAPI publiée par GET /openapi.json et ouvrable dans Swagger. */
-const jsonResponse = (description: string) => ({
+const jsonResponse = (description: string, dataSchema?: unknown) => ({
   description,
   content: {
     "application/json": {
-      schema: { $ref: "#/components/schemas/SuccessEnvelope" },
+      schema: dataSchema
+        ? {
+            type: "object",
+            required: ["data"],
+            properties: {
+              data: dataSchema,
+              meta: { type: "object", description: "Métadonnées, par exemple la pagination." },
+            },
+          }
+        : { $ref: "#/components/schemas/SuccessEnvelope" },
     },
   },
 });
@@ -55,9 +64,14 @@ export const openApiDocument = {
     "/auth/logout": {
       post: {
         tags: ["Auth"],
-        summary: "Révoquer le refresh token",
+        summary: "Déconnecter le compte et révoquer ses sessions",
+        description: "Requiert un access token Bearer valide. Invalide immédiatement les access tokens via tokenVersion et révoque tous les refresh tokens du compte.",
+        security: [{ bearerAuth: [] }],
         requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/RefreshInput" } } } },
-        responses: { "204": { description: "Session révoquée" } },
+        responses: {
+          "204": { description: "Sessions révoquées" },
+          "401": { $ref: "#/components/responses/Error" },
+        },
       },
     },
     "/auth/forgot-password": {
@@ -140,6 +154,7 @@ export const openApiDocument = {
     "/tickets": {
       get: {
         tags: ["Tickets"], summary: "Lister, filtrer, trier et paginer les tickets", security: [{ bearerAuth: [] }],
+        description: "Pour USER, les éléments ne contiennent pas createdById ni de données de brouillon IA internes. La lecture détaillée expose uniquement customer_response.",
         parameters: [
           { name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 } },
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 20 } },
@@ -149,23 +164,36 @@ export const openApiDocument = {
           { name: "sortBy", in: "query", schema: { type: "string", enum: ["createdAt", "title", "status"], default: "createdAt" } },
           { name: "order", in: "query", schema: { type: "string", enum: ["asc", "desc"], default: "desc" } },
         ],
-        responses: { "200": jsonResponse("Page de tickets et métadonnées de pagination"), "401": { $ref: "#/components/responses/Error" } },
+        responses: {
+          "200": jsonResponse("Page de tickets et métadonnées de pagination", {
+            type: "array",
+            items: { oneOf: [{ $ref: "#/components/schemas/TicketStaffSummary" }, { $ref: "#/components/schemas/TicketUserSummary" }] },
+          }),
+          "401": { $ref: "#/components/responses/Error" },
+        },
       },
       post: {
         tags: ["Tickets"], summary: "Créer un ticket pour le compte connecté", security: [{ bearerAuth: [] }],
         requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/CreateTicketInput" } } } },
-        responses: { "201": jsonResponse("Ticket créé"), "400": { $ref: "#/components/responses/Error" } },
+        responses: {
+          "201": jsonResponse("Ticket créé", {
+            oneOf: [{ $ref: "#/components/schemas/TicketStaffSummary" }, { $ref: "#/components/schemas/TicketUserSummary" }],
+          }),
+          "400": { $ref: "#/components/responses/Error" },
+        },
       },
     },
     "/tickets/{id}/ai-response": {
       post: {
         tags: ["Tickets"],
         summary: "Générer et enregistrer une réponse IA",
-        description: "Accessible à SUPER_ADMIN, ADMIN et AGENT; un USER peut l'utiliser uniquement pour son propre ticket. Le résultat est enregistré et renvoyé dans la réponse HTTP; aucun e-mail n'est envoyé et le statut du ticket n'est pas modifié.",
+        description: "Accessible à SUPER_ADMIN, ADMIN et AGENT; un USER peut l'utiliser uniquement pour son propre ticket. Le brouillon complet est conservé en base. La réponse USER est filtrée et contient seulement id, ticketId et response.customer_response. Aucun e-mail n'est envoyé et le statut du ticket n'est pas modifié.",
         security: [{ bearerAuth: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
         responses: {
-          "201": jsonResponse("Brouillon IA enregistré"),
+          "201": jsonResponse("Brouillon IA enregistré; réponse filtrée pour USER", {
+            oneOf: [{ $ref: "#/components/schemas/TicketAiDraft" }, { $ref: "#/components/schemas/TicketAiDraftUserView" }],
+          }),
           "400": { $ref: "#/components/responses/Error" },
           "401": { $ref: "#/components/responses/Error" },
           "403": { $ref: "#/components/responses/Error" },
@@ -194,7 +222,7 @@ export const openApiDocument = {
       post: {
         tags: ["Tickets"],
         summary: "Ajouter un commentaire et obtenir une réponse IA",
-        description: "Réservé au propriétaire USER d'un ticket ouvert. Maximum 20 commentaires USER par ticket et une génération IA à la fois. Cette opération n'utilise pas de clé d'idempotence : une répétition après la fin de la première opération peut créer un doublon et un nouvel appel IA.",
+        description: "Réservé au propriétaire USER d'un ticket ouvert. Maximum 20 commentaires USER par ticket, 20 générations IA par compte USER sur une fenêtre de 15 minutes et une génération IA à la fois. Cette opération n'utilise pas de clé d'idempotence : une répétition après la fin de la première opération peut créer un doublon et un nouvel appel IA.",
         security: [{ bearerAuth: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
         requestBody: {
@@ -208,6 +236,7 @@ export const openApiDocument = {
           "403": { $ref: "#/components/responses/Error" },
           "404": { $ref: "#/components/responses/Error" },
           "409": { $ref: "#/components/responses/Error" },
+          "429": { $ref: "#/components/responses/Error" },
           "502": { $ref: "#/components/responses/Error" },
           "503": { $ref: "#/components/responses/Error" },
           "504": { $ref: "#/components/responses/Error" },
@@ -218,10 +247,15 @@ export const openApiDocument = {
       get: {
         tags: ["Tickets"],
         summary: "Lire un ticket accessible au compte",
-        description: "Les rôles support reçoivent uniquement le dernier texte customer_response du brouillon IA, s'il existe. Le rôle USER ne reçoit pas ce texte non validé.",
+        description: "USER reçoit les champs du ticket nécessaires à son suivi, sans createdById ni contenu interne du brouillon IA, ainsi que le seul champ customer_response. Les rôles support reçoivent le ticket et customer_response.",
         security: [{ bearerAuth: [] }],
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
-        responses: { "200": jsonResponse("Ticket"), "404": { $ref: "#/components/responses/Error" } },
+        responses: {
+          "200": jsonResponse("Ticket filtré selon le rôle", {
+            oneOf: [{ $ref: "#/components/schemas/TicketStaffView" }, { $ref: "#/components/schemas/TicketUserView" }],
+          }),
+          "404": { $ref: "#/components/responses/Error" },
+        },
       },
     },
     "/tickets/{id}/status": {
@@ -317,6 +351,75 @@ export const openApiDocument = {
           model: { type: "string" },
           response: { $ref: "#/components/schemas/TicketAiResponse" },
           createdAt: { type: "string", format: "date-time" },
+        },
+      },
+      TicketAiDraftUserView: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "ticketId", "response"],
+        properties: {
+          id: { type: "string", description: "Identifiant du brouillon" },
+          ticketId: { type: "string", format: "uuid" },
+          response: {
+            type: "object",
+            additionalProperties: false,
+            required: ["customer_response"],
+            properties: { customer_response: { type: "string" } },
+          },
+        },
+      },
+      TicketStaffSummary: {
+        type: "object",
+        required: ["id", "title", "description", "category", "status", "createdAt", "createdById"],
+        properties: {
+          id: { type: "string", format: "uuid" },
+          title: { type: "string" },
+          description: { type: "string" },
+          category: { type: "string", enum: ["AUTHENTICATION", "DISPLAY", "PERFORMANCE", "NETWORK", "BUG", "PAYMENT", "ACCOUNT", "OTHER"] },
+          status: { type: "string" },
+          createdAt: { type: "string", format: "date-time" },
+          createdById: { type: ["string", "null"] },
+        },
+      },
+      TicketUserSummary: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "title", "description", "category", "status", "createdAt"],
+        properties: {
+          id: { type: "string", format: "uuid" },
+          title: { type: "string" },
+          description: { type: "string" },
+          category: { type: "string", enum: ["AUTHENTICATION", "DISPLAY", "PERFORMANCE", "NETWORK", "BUG", "PAYMENT", "ACCOUNT", "OTHER"] },
+          status: { type: "string" },
+          createdAt: { type: "string", format: "date-time" },
+        },
+      },
+      TicketStaffView: {
+        type: "object",
+        required: ["id", "title", "description", "category", "status", "createdAt", "createdById", "customer_response"],
+        properties: {
+          id: { type: "string", format: "uuid" },
+          title: { type: "string" },
+          description: { type: "string" },
+          category: { type: "string", enum: ["AUTHENTICATION", "DISPLAY", "PERFORMANCE", "NETWORK", "BUG", "PAYMENT", "ACCOUNT", "OTHER"] },
+          status: { type: "string" },
+          createdAt: { type: "string", format: "date-time" },
+          createdById: { type: ["string", "null"] },
+          customer_response: { type: ["string", "null"] },
+        },
+      },
+      TicketUserView: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "title", "description", "category", "status", "createdAt", "customer_response"],
+        properties: {
+          id: { type: "string", format: "uuid" },
+          title: { type: "string" },
+          description: { type: "string" },
+          category: { type: "string", enum: ["AUTHENTICATION", "DISPLAY", "PERFORMANCE", "NETWORK", "BUG", "PAYMENT", "ACCOUNT", "OTHER"] },
+          status: { type: "string" },
+          createdAt: { type: "string", format: "date-time" },
+          customer_response: { type: ["string", "null"] },
         },
       },
     },

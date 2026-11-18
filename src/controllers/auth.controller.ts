@@ -41,8 +41,11 @@ export const refresh: RequestHandler = async (req, res) => {
 };
 
 export const logout: RequestHandler = async (req, res) => {
-  await authService.logout(getValidatedBody<RefreshInput>(res));
-  // 204 indique que la déconnexion a réussi et qu'il n'y a pas de corps à renvoyer.
+  await authService.logout(
+    getAuthenticatedUserId(req),
+    getValidatedBody<RefreshInput>(res),
+  );
+  // tokenVersion invalide les access tokens de ce compte; 204 ne renvoie aucun corps.
   res.status(204).send();
 };
 

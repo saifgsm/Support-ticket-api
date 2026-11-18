@@ -228,6 +228,58 @@ test("l'authentification accepte un bon mot de passe et refuse un mauvais token"
   assert.equal(protectedResponse.status, 401);
 });
 
+test("logout invalide immédiatement l'access token et révoque le refresh token", async () => {
+  const { user } = await createUser("USER");
+  const login = await callApi("/auth/login", {
+    method: "POST",
+    body: { email: user.email, password: commonPassword },
+  });
+  const loginBody = await login.json() as {
+    data: { accessToken: string; refreshToken: string };
+  };
+  assert.equal(login.status, 200);
+
+  const logout = await callApi("/auth/logout", {
+    method: "POST",
+    token: loginBody.data.accessToken,
+    body: { refreshToken: loginBody.data.refreshToken },
+  });
+  assert.equal(logout.status, 204);
+
+  const protectedResponse = await callApi("/auth/me", {
+    token: loginBody.data.accessToken,
+  });
+  assert.equal(protectedResponse.status, 401);
+
+  const refresh = await callApi("/auth/refresh", {
+    method: "POST",
+    body: { refreshToken: loginBody.data.refreshToken },
+  });
+  assert.equal(refresh.status, 401);
+});
+
+test("la connexion retrouve un compte historique dont l'e-mail stocké contient des majuscules", async () => {
+  const email = `${testPrefix}-MixedCase-${randomUUID()}@example.test`;
+  const user = await prisma.user.create({
+    data: {
+      email,
+      name: "Test legacy email casing",
+      passwordHash: await hashPassword(commonPassword),
+      role: "USER",
+      status: "ACTIVE",
+    },
+  });
+
+  const login = await callApi("/auth/login", {
+    method: "POST",
+    body: { email: `  ${email.toUpperCase()}  `, password: commonPassword },
+  });
+  assert.equal(login.status, 200);
+  const body = await login.json() as { data: { user: { id: string }; accessToken: string } };
+  assert.equal(body.data.user.id, user.id);
+  assert.ok(body.data.accessToken);
+});
+
 test("les rôles limitent l'accès, les utilisateurs ne voient que leurs tickets et la liste est paginée", async () => {
   const owner = await createUser("USER");
   const other = await createUser("USER");
@@ -318,15 +370,17 @@ test("la génération IA exige un token et autorise le USER propriétaire du tic
   const ticket = await createCustomerTicket(customer.token);
   const response = await callAiApi(`/tickets/${ticket.id}/ai-response`, customer.token);
   const body = await response.json() as {
-    data: { ticketId: string; generatedById: string; response: { customer_response: string } };
+    data: { id: string; ticketId: string; response: { customer_response: string } };
   };
   assert.equal(response.status, 201);
+  assert.equal(typeof body.data.id, "string");
   assert.equal(body.data.ticketId, ticket.id);
-  assert.equal(body.data.generatedById, customer.user.id);
   assert.ok(body.data.response.customer_response.length > 0);
+  assert.deepEqual(Object.keys(body.data).sort(), ["id", "response", "ticketId"]);
+  assert.deepEqual(Object.keys(body.data.response), ["customer_response"]);
 });
 
-test("le ticket retourné au support inclut le brouillon IA sans le montrer au client", async () => {
+test("le support reçoit le brouillon complet et USER reçoit uniquement les champs autorisés", async () => {
   const customer = await createUser("USER");
   const agent = await createUser("AGENT");
   const created = await callApi("/tickets", {
@@ -338,8 +392,11 @@ test("le ticket retourné au support inclut le brouillon IA sans le montrer au c
       category: "AUTHENTICATION",
     },
   });
-  const createdBody = await created.json() as { data: { id: string; status: string } };
+  const createdBody = await created.json() as {
+    data: Record<string, unknown> & { id: string; status: string };
+  };
   assert.equal(created.status, 201);
+  assert.equal("createdById" in createdBody.data, false);
   createdTicketIds.push(createdBody.data.id);
 
   const response = await callAiApi(`/tickets/${createdBody.data.id}/ai-response`, agent.token);
@@ -369,7 +426,15 @@ test("le ticket retourné au support inclut le brouillon IA sans le montrer au c
   const customerView = await callApi(`/tickets/${createdBody.data.id}`, { token: customer.token });
   const customerBody = await customerView.json() as { data: Record<string, unknown> };
   assert.equal(customerView.status, 200);
-  assert.equal("aiResponse" in customerBody.data, false);
+  assert.match(String(customerBody.data.customer_response), /préciser/);
+  assert.equal("createdById" in customerBody.data, false);
+  assert.equal("generatedById" in customerBody.data, false);
+  assert.equal("model" in customerBody.data, false);
+  assert.equal("summary" in customerBody.data, false);
+  assert.deepEqual(
+    Object.keys(customerBody.data).sort(),
+    ["category", "createdAt", "customer_response", "description", "id", "status", "title"],
+  );
 });
 
 test("la conversation exige l'authentification, le rôle USER et la propriété du ticket", async () => {
@@ -461,7 +526,7 @@ test("un ticket fermé refuse les commentaires avant l'appel IA", async () => {
   assert.equal(conversationHarness.generationCalls, 0);
 });
 
-test("la limite est de 20 commentaires USER par ticket", async () => {
+test("le quota limite à 20 générations IA par utilisateur sur 15 minutes, tous tickets confondus", async () => {
   conversationHarness.generationCalls = 0;
   const owner = await createUser("USER");
   const ticket = await createCustomerTicket(owner.token);
@@ -473,10 +538,11 @@ test("la limite est de 20 commentaires USER par ticket", async () => {
     assert.equal(response.status, 201);
   }
 
-  const twentyFirst = await callAiApi(`/tickets/${ticket.id}/comments`, owner.token, {
-    body: { content: "Ce commentaire dépasse la limite." },
+  const secondTicket = await createCustomerTicket(owner.token);
+  const twentyFirst = await callAiApi(`/tickets/${secondTicket.id}/comments`, owner.token, {
+    body: { content: "Cette requête dépasse le quota IA par compte." },
   });
-  assert.equal(twentyFirst.status, 409);
+  assert.equal(twentyFirst.status, 429);
   assert.equal(conversationHarness.generationCalls, 20);
 
   const historyResponse = await callAiApi(`/tickets/${ticket.id}/comments`, owner.token, { method: "GET" });

@@ -6,6 +6,8 @@ import { ticketUuidSchema } from "../modules/tickets/tickets.schemas.js";
 import { ticketConversationAiService } from "./ticket-conversation-ai.service.js";
 
 export const MAX_USER_COMMENTS_PER_TICKET = 20;
+export const MAX_USER_AI_GENERATIONS_PER_WINDOW = 20;
+export const USER_AI_GENERATION_WINDOW_MS = 15 * 60 * 1000;
 
 type TicketConversationResponder = Pick<typeof ticketConversationAiService, "generateReply">;
 
@@ -74,6 +76,25 @@ export function createTicketCommentsService(
         });
         if (activeGeneration) {
           throw new ApiError(409, "Une réponse IA est déjà en cours pour ce ticket.");
+        }
+
+        // Le verrou du compte rend le quota global atomique même si le même USER
+        // envoie des commentaires simultanément sur des tickets différents.
+        const lockedUsers = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE
+        `;
+        if (lockedUsers.length === 0) throw new ApiError(401, "Compte introuvable.");
+
+        const generationWindowStart = new Date(Date.now() - USER_AI_GENERATION_WINDOW_MS);
+        const userGenerationCount = await tx.comment.count({
+          where: {
+            authorId: userId,
+            type: "USER",
+            createdAt: { gte: generationWindowStart },
+          },
+        });
+        if (userGenerationCount >= MAX_USER_AI_GENERATIONS_PER_WINDOW) {
+          throw new ApiError(429, "La limite de 20 générations IA par utilisateur sur 15 minutes est atteinte.");
         }
 
         const userCommentCount = await tx.comment.count({
