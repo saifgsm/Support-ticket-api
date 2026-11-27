@@ -7,10 +7,151 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum Role {
+  // Rôles utilisés par le middleware d'autorisation pour décider qui peut appeler une route.
+  SUPER_ADMIN
+  ADMIN
+  AGENT
+  USER
+}
+
+enum UserStatus {
+  // INVITED attend l'acceptation, ACTIVE peut se connecter, DISABLED est bloqué.
+  INVITED
+  ACTIVE
+  DISABLED
+}
+
+enum TicketCategory {
+  AUTHENTICATION
+  DISPLAY
+  PERFORMANCE
+  NETWORK
+  BUG
+  PAYMENT
+  ACCOUNT
+  OTHER
+}
+
+enum CommentType {
+  USER
+  AI
+}
+
+enum AiGenerationStatus {
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id                  String               @id @default(cuid())
+  email               String               @unique
+  name                String
+  // On persiste uniquement le hash, jamais le mot de passe en clair.
+  passwordHash        String
+  role                Role                 @default(USER)
+  status              UserStatus           @default(INVITED)
+  // Comparée à la version du JWT pour invalider les anciens access tokens.
+  tokenVersion        Int                  @default(0)
+  invitationExpiresAt DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  refreshTokens       RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
+  auditLogsAsActor    AuditLog[]           @relation("AuditActor")
+  auditLogsAsTarget   AuditLog[]           @relation("AuditTarget")
+  tickets             Ticket[]
+  ticketAiDrafts      TicketAiDraft[]
+  comments            Comment[]
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  actorId      String?
+  targetUserId String?
+  action       String
+  details      Json?
+  createdAt    DateTime @default(now())
+  actor        User?    @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  targetUser   User?    @relation("AuditTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+
+  @@index([actorId, createdAt])
+  @@index([targetUserId, createdAt])
+}
+
+model RefreshToken {
+  // Les refresh tokens ont une ligne révocable en base; tokenHash contient leur hash,
+  // jamais le secret original renvoyé au client.
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+}
+
+model PasswordResetToken {
+  // Jetons de récupération temporaires, à usage unique et stockés sous forme de hash.
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt])
+}
+
 model Ticket {
-  id          Int      @id @default(autoincrement())
+  id          String          @id @default(uuid()) @db.Uuid
   title       String
   description String
-  status      String   @default("open")
-  createdAt   DateTime @default(now())
+  category    TicketCategory
+  status      String          @default("open")
+  createdAt   DateTime        @default(now())
+  // Permet de filtrer les tickets qu'un utilisateur peut consulter.
+  createdById String?
+  createdBy   User?           @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  aiDrafts    TicketAiDraft[]
+  comments    Comment[]
+
+  @@index([createdById])
+}
+
+// Chaque génération est conservée séparément comme brouillon non envoyé.
+model TicketAiDraft {
+  id            String   @id @default(cuid())
+  ticketId      String   @db.Uuid
+  generatedById String?
+  model         String
+  response      Json
+  createdAt     DateTime @default(now())
+  ticket        Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  generatedBy   User?    @relation(fields: [generatedById], references: [id], onDelete: SetNull)
+
+  @@index([ticketId, createdAt])
+  @@index([generatedById, createdAt])
+}
+
+model Comment {
+  id        String              @id @default(cuid())
+  content   String              @db.Text
+  type      CommentType
+  ticketId  String              @db.Uuid
+  authorId  String?
+  createdAt DateTime            @default(now())
+  aiStatus  AiGenerationStatus?
+  replyToId String?             @unique
+  ticket    Ticket              @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author    User?               @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  replyTo   Comment?            @relation("CommentReplies", fields: [replyToId], references: [id], onDelete: Cascade)
+  aiReply   Comment?            @relation("CommentReplies")
+
+  @@index([ticketId, createdAt, id])
+  @@index([authorId, createdAt])
 }
